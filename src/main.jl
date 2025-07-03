@@ -4,8 +4,9 @@ using Enzyme
 
 # General parameters
 num_spins = 20
+num_time_segments = 10
 slice_thickness = 4e-3
-M_ex = [0.0, 1.0, 0.0] # Excitation magnetization
+M_ex = [0.0, 1.0, 0.0] # Excited magnetization
 M_eq = [0.0, 0.0, 1.0] # Equilibrium magnetization
 
 # Simulation parameters
@@ -26,8 +27,9 @@ params = map(zs) do z
 end
 
 # Relevant functions
-include("src/simulation.jl")
-include("src/optimization.jl")
+include("simulation.jl")
+include("optimization.jl")
+include("plotting.jl") # I didn't bother to create this one
 
 # Optimize RF pulse
 num_iters = 50
@@ -35,3 +37,6 @@ step_size = 0.001
 backend = AutoEnzyme()
 x = zeros(num_time_segments)
 x, loss = gradient_descent(x, step_size, num_iters, objective)
+
+# Plots
+plot_results(x, loss)

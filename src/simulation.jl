@@ -1,5 +1,4 @@
 # RF pulse
-num_time_segments = 10
 t_nodes = range(0.0, total_time, num_time_segments)
 
 function solve(m0, params)
