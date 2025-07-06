@@ -120,6 +120,7 @@ function objective_vectorized(Bx_values)
     # B1_power_loss = sum(abs2, Bx_values)
     # total_loss += zero_target_penalty + B1_power_loss * 5e3
     # total_loss += zero_target_penalty
+    
     return total_loss
 end
 
