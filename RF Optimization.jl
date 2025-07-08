@@ -3,44 +3,51 @@ using LinearAlgebra
 using DifferentiationInterface
 using Enzyme
 using Plots
-using Random
-using Statistics
 
 ## Point setup
-num_points = 20
+num_time_segments = 25  
 
 # Define excited slice parameters
 excited_lower_bound = -0.2e-2
 excited_upper_bound = 0.2e-2
 
-z_positions = collect(range(-0.7, 0.7, length=num_points)) .* 1e-2
-m0s = fill(SA[0.0, 0.0, 1.0], num_points)
-
-targets = [(excited_lower_bound <= z <= excited_upper_bound) ? SA[0.0, 0.5, 0.0] : SA[0.0, 0.0, 1.0] for z in z_positions]
-
-println("Z positions (cm): ", z_positions)
-println("Excited slice positions: ", [z for z in z_positions if -0.15e-2 <= z <= 0.15e-2])
-
 total_time = 4.0e-3
-dt = 1e-7
-num_time_segments = 50  
-Nsteps = Int(round(total_time / dt))
-initial_Bx = zeros(num_time_segments)
-println("Initial Bx values: ", initial_Bx)
-
-# Pre-compute constants
-segment_duration = total_time / num_time_segments
-inv_segment_duration = num_time_segments / total_time
 
 # Parameters
 params = (
-    γ = 2*π * 42.58e6,
-    T1 = 1.0,     
-    T2 = 1.0, 
+    γ = 2π * 42.58e6,
+    T1 = 1000.0,     
+    T2 = 1000.0, 
     M0 = 1.0, 
     By = 0.0,
     Gz = 10e-3
 )
+
+dz = 2π / (params.γ * params.Gz * total_time)
+
+function target_positions(N, dz)
+    left = -floor(Int, (N - 1) / 2)
+    right =  ceil(Int, (N - 1) / 2)
+    return dz * collect(left:right)
+end
+
+# This avoids aliasing (Nyquist criterion)
+z_positions = target_positions(2 * num_time_segments, dz / 2)
+num_points = length(z_positions)
+
+println("FOV: ", round.((z_positions[end] - z_positions[1]) * 1e3; digits=2), " [mm], dz: ", round(dz * 1e3; digits=2), " [mm]")
+# z_positions = collect(range(-0.7, 0.7, length=num_points)) .* 1e-2
+m0s = fill(SA[0.0, 0.0, 1.0], num_points)
+
+targets = [(excited_lower_bound <= z <= excited_upper_bound) ? SA[0.0, 0.5, 0.0] : SA[0.0, 0.0, 1.0] for z in z_positions]
+
+dt = 1e-7
+Nsteps = Int(round(total_time / dt))
+initial_Bx = zeros(num_time_segments)
+
+# Pre-compute constants
+segment_duration = total_time / num_time_segments
+inv_segment_duration = (num_time_segments - 1) / total_time
 
 # Pre-compute Bz values
 Bz_values = SVector{num_points}(params.Gz .* z_positions)
@@ -53,12 +60,14 @@ struct ForwardEuler
 end
 
 ## Optimized Functions
-@inline function get_current_Bx_fast(t, Bx_values)
-    segment_idx = min(Int(floor(t * inv_segment_duration)) + 1, num_time_segments)
-    return Bx_values[segment_idx]
+function get_current_Bx_fast(t, Bx_values)
+    segment_idx1 = min(Int(floor(t * inv_segment_duration)) + 1, num_time_segments)
+    segment_idx2 = min(Int(floor(t * inv_segment_duration)) + 2, num_time_segments)
+    α = (t * inv_segment_duration) - (segment_idx1 - 1)
+    return Bx_values[segment_idx1] * (1 - α) + Bx_values[segment_idx2] * α
 end
 
-@inline function bloch_fast(m::SVector{3,Float64}, Bx::Float64, Bz::Float64, fixed_params)
+function bloch_fast(m, Bx, Bz, fixed_params)
     γ, T1, T2, M0, By, _ = fixed_params
     
     # Pre-computed magnetic field components
@@ -71,13 +80,13 @@ end
     return cross_term + relaxation_term
 end
 
-@inline function step_fast(dt, m, t, Bx_values, Bz::Float64, fixed_params)
+function step_fast(dt, m, t, Bx_values, Bz, fixed_params)
     current_Bx = get_current_Bx_fast(t, Bx_values)
     dM = bloch_fast(m, current_Bx, Bz, fixed_params)
     return m + dM * dt
 end
 
-function solve_fast(m0::SVector{3,Float64}, Bx_values, Bz::Float64, fixed_params)
+function solve_fast(m0, Bx_values, Bz, fixed_params)
     m = m0
     for i in 1:Nsteps
         t = (i - 1) * dt
@@ -95,80 +104,52 @@ function objective_vectorized(Bx_values)
 
     # Compute losses for all points at once - only comparing Mx and My
     total_loss = 0.0
+
+    # λ = 0.1
     
     for idx in 1:num_points
         final_state = final_states[idx]
         target = targets_static[idx]
         
         # Standard data consistency loss - only Mx and My components
-        data_consistency_loss = sum(abs2, final_state[1:2] .- target[1:2])
-        total_loss += data_consistency_loss
+        total_loss += sum(abs2, final_state[1:2] .- target[1:2]) / num_points
+
+        # # Total variation
+        # if idx < num_points
+        #     total_loss += λ * sum(abs2, final_states[idx+1][1:2] .- final_states[idx][1:2]) / (num_points - 1)
+        # end
     end
     
     return total_loss
 end
 
+backend = AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
 function gradient_descent_step(x, step_size, objective)
-    value, grad = value_and_gradient(objective, AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse)), x)
+    loss, grad = value_and_gradient(objective, backend, x)
     x_new = x .- step_size .* grad
     # Apply constraints via projection (projected gradient method)
-    x_new = clamp.(x_new, -8e-6, 8e-6)
-    return x_new, value
+    # x_new = clamp.(x_new, -8e-6, 8e-6)
+    return x_new, loss
 end
 
 function optimize(x, step_size, iters, objective)
-    println("Starting optimization...")
-    
-    loss = zeros(iters)
-    final_iter = iters
-    
-    tolerance_percent = 0.1
-    patience = 10 
-    min_iterations = 10 
-    no_improvement_count = 0
-    best_loss = Inf
-    
+    println("Starting optimization... step_size: ", step_size)
+    loss = zeros(iters)   
+    sol = zeros(num_time_segments, iters) 
     for i in 1:iters 
         x, loss[i] = gradient_descent_step(x, step_size, objective)
-        
-        # Early stopping logic
-        if i >= min_iterations
-            if best_loss > 0
-                improvement_percent = (best_loss - loss[i]) / best_loss * 100
-            else
-                improvement_percent = abs(loss[i] - best_loss)
-            end
-            
-            if improvement_percent > tolerance_percent
-                best_loss = loss[i]
-                no_improvement_count = 0
-            else
-                no_improvement_count += 1
-            end
-            
-            if no_improvement_count >= patience
-                println("Early stopping at iteration $i - no improvement > $(tolerance_percent)% for $patience iterations")
-                final_iter = i
-                break
-            end
-        end
-        
-        if i % 50 == 0 
-            println("Iteration $i: Loss = $(loss[i]) | Best: $best_loss | No improvement: $no_improvement_count")
-        end
-        
-        final_iter = i
+        sol[:, i] = x
+        # if i % 10 == 0
+            println("Iteration $i: Loss = $(loss[i])")
+        # end
     end
-    
-    return x, loss[1:final_iter]
+    return sol, loss
 end
 
 
 ## Run Optimization
-optimized_Bx, loss_history = optimize(initial_Bx, 1e-11, 500, objective_vectorized)
-
-println("Final optimized Bx values: ", optimized_Bx)
-println("Final loss: ", loss_history[end])
+sol_history, loss_history = @time optimize(initial_Bx, 2e-10, 1, objective_vectorized)
+optimized_Bx = sol_history[:, end]
 
 ## Plotting Results
 
@@ -210,10 +191,11 @@ p3 = plot(t * 1e3, Bx_interp * 1e6,
 p4 = plot(xlabel="Z Position", ylabel="Magnetization", 
           title="All Magnetization Components")
 plot!(p4, z_positions, final_states[1, :], marker=:circle, label="Final Mx", color=:red)
-plot!(p4, z_positions, final_states[2, :], marker=:triangle, label="Final My", color=:blue)
-plot!(p4, z_positions, final_states[3, :], marker=:square, label="Final Mz", color=:green, lw=2)
+plot!(p4, z_positions, final_states[2, :], marker=:circle, label="Final My", color=:blue)
+plot!(p4, z_positions, final_states[3, :], marker=:circle, label="Final Mz", color=:green, lw=2)
 
-## Create combined plot
+
+# Create combined plot
 combined_plot = plot(p1, p2, p3, p4, layout=(2,2), size=(800, 600))
 display(combined_plot)
 
@@ -221,9 +203,9 @@ display(combined_plot)
 println("\n=== Optimization Summary ===")
 println("Converged in $(length(loss_history)) iterations")
 println("Final loss: $(loss_history[end])")
-println("Optimized Bx values: $(optimized_Bx)")
+# println("Optimized Bx values: $(optimized_Bx)")
 
 # Calculate and print overall accuracy
-my_error = sqrt(mean((target_my .- final_my).^2))
-println("\nRMS error in My: $(round(my_error, digits=4))")
-println("Max error in My: $(round(maximum(abs.(target_my .- final_my)), digits=4))")
+# my_error = sqrt(mean((target_my .- final_my).^2))
+# println("\nRMS error in My: $(round(my_error, digits=4))")
+# println("Max error in My: $(round(maximum(abs.(target_my .- final_my)), digits=4))")
