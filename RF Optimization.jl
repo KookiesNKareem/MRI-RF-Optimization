@@ -16,14 +16,14 @@ excited_upper_bound = 0.2e-2
 z_positions = collect(range(-0.7, 0.7, length=num_points)) .* 1e-2
 m0s = fill(SA[0.0, 0.0, 1.0], num_points)
 
-targets = [(excited_lower_bound <= z <= excited_upper_bound) ? SA[0.0, 1.0, 0.0] : SA[0.0, 0.0, 1.0] for z in z_positions]
+targets = [(excited_lower_bound <= z <= excited_upper_bound) ? SA[0.0, 0.5, 0.0] : SA[0.0, 0.0, 1.0] for z in z_positions]
 
 println("Z positions (cm): ", z_positions)
 println("Excited slice positions: ", [z for z in z_positions if -0.15e-2 <= z <= 0.15e-2])
 
-total_time = 2.0e-3
+total_time = 4.0e-3
 dt = 1e-7
-num_time_segments = 10  
+num_time_segments = 50  
 Nsteps = Int(round(total_time / dt))
 initial_Bx = zeros(num_time_segments)
 println("Initial Bx values: ", initial_Bx)
@@ -93,33 +93,17 @@ function objective_vectorized(Bx_values)
         solve_fast(m0s_static[idx], Bx_values, Bz_values[idx], params)
     end
 
-    for i in eachindex(Bx_values)
-        Bx_values[i] = clamp(Bx_values[i], -8e-6, 8e-6)
-    end
-
-    # Compute losses for all points at once
+    # Compute losses for all points at once - only comparing Mx and My
     total_loss = 0.0
-    zero_target_penalty = 0.0
     
     for idx in 1:num_points
         final_state = final_states[idx]
         target = targets_static[idx]
         
-        # Standard data consistency loss
-        data_consistency_loss = sum(abs2, final_state .- target)
+        # Standard data consistency loss - only Mx and My components
+        data_consistency_loss = sum(abs2, final_state[1:2] .- target[1:2])
         total_loss += data_consistency_loss
-        
-        # for component in 1:3
-        #     if abs(target[component]) < 1e-8
-        #         final_val = final_state[component]
-        #         zero_target_penalty += final_val^2 
-        #     end
-        # end
     end
-    # B1 power loss
-    # B1_power_loss = sum(abs2, Bx_values)
-    # total_loss += zero_target_penalty + B1_power_loss * 5e3
-    # total_loss += zero_target_penalty
     
     return total_loss
 end
@@ -127,6 +111,8 @@ end
 function gradient_descent_step(x, step_size, objective)
     value, grad = value_and_gradient(objective, AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse)), x)
     x_new = x .- step_size .* grad
+    # Apply constraints via projection (projected gradient method)
+    x_new = clamp.(x_new, -8e-6, 8e-6)
     return x_new, value
 end
 
@@ -177,8 +163,9 @@ function optimize(x, step_size, iters, objective)
     return x, loss[1:final_iter]
 end
 
+
 ## Run Optimization
-optimized_Bx, loss_history = optimize(initial_Bx, 2e-11, 500, objective_vectorized)
+optimized_Bx, loss_history = optimize(initial_Bx, 1e-11, 500, objective_vectorized)
 
 println("Final optimized Bx values: ", optimized_Bx)
 println("Final loss: ", loss_history[end])
@@ -199,15 +186,15 @@ for idx in 1:num_points
 end
 
 ## Plot 2: Final magnetization vs targets
-target_my = [target[2] for target in targets_static]
-final_my = final_states[2, :]
+target_transverse = [sqrt(target[1]^2 + target[2]^2) for target in targets_static]
+final_transverse = sqrt.(final_states[1, :].^2 .+ final_states[2, :].^2)
 
-p2 = plot(z_positions * 1e2, final_my, marker=:circle, markersize=6, 
-         label="Final My", color=:red, lw=2,
-         xlabel="Z Position (cm)", ylabel="Magnetization (My)",
-         title="Final vs Target Magnetization")
-plot!(p2, z_positions * 1e2, target_my, marker=:square, markersize=6,
-      label="Target My", color=:green, lw=2)
+p2 = plot(z_positions * 1e2, final_transverse, marker=:circle, markersize=6, 
+         label="Final |Mxy|", color=:red, lw=2,
+         xlabel="Z Position (cm)", ylabel="Transverse Magnetization |Mxy|",
+         title="Final vs Target Transverse Magnetization")
+plot!(p2, z_positions * 1e2, target_transverse, marker=:square, markersize=6,
+      label="Target |Mxy|", color=:green, lw=2)
 
 ## Plot 3: Optimized Bx field over time
 time_segments = 1:num_time_segments

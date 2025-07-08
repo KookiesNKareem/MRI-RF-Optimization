@@ -84,6 +84,7 @@ x_solution, loss, distances, x_path = optimize(x, 1e-2, 5000, solve_objective)
 println("\n=== OPTIMAL PATH ANALYSIS ===")
 println("Optimal initial conditions: ", x_solution)
 
+## 
 mt_optimal = solve(x_solution, dt, 1.0, params, ForwardEuler())
 mt_original = solve(x, dt, 1.0, params, ForwardEuler())
 @show mt_original[:, end]
@@ -94,8 +95,8 @@ println("Final state reached: ", final_state)
 println("Target state: ", target)
 println("Final error: ", norm(final_state - target))
 
-p1 = plot(loss, title="Optimization Loss", xlabel="Iteration", ylabel="Loss", 
-          label="Loss", legend=:topright, lw=2)
+# p1 = plot(loss, title="Optimization Loss", xlabel="Iteration", ylabel="Loss", 
+#           label="Loss", legend=:topright, lw=2)
 
 time_steps = 0:dt:1.0
 p2 = plot(time_steps, mt_optimal[1, :], label="Mx", lw=2, xlabel="Time (s)", ylabel="Magnetization", legend=:topright)
@@ -106,5 +107,5 @@ hline!([target[2]], ls=:dash, color=2, alpha=0.7, label=nothing)
 hline!([target[3]], ls=:dash, color=3, alpha=0.7, label=nothing)
 title!("Optimal Magnetization Trajectory")
 
-final_plot = plot(p1, p2, layout=(2,1), size=(800, 600))
+final_plot = plot(p2, layout=(1,1), size=(800, 600))
 display(final_plot)
