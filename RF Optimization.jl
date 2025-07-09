@@ -11,30 +11,21 @@ num_points = 41 # Output
 
 # Define excited slice parameters
 slice_thickness = 4e-3
-total_time = 4.0e-3
+total_time = 10.0e-3
 
 # Slice Parameters
 γ = 2π * 42.58e6
 Gz = 10e-3
 
-# dz = 2π / (γ * Gz * total_time)
-# function target_positions(N, dz)
-#     left = -floor(Int, (N - 1) / 2)
-#     right =  ceil(Int, (N - 1) / 2)
-#     return dz * collect(left:right)
-# end
-
 # This avoids aliasing (Nyquist criterion)
 z_positions = range(-3slice_thickness/2, 3slice_thickness/2, num_points)
 
 params = map(z_positions) do z
-    (
-        γ = γ,
-        T1 = 1000.0,     
-        T2 = 1000.0, 
-        M0 = 1.0, 
-        Bz = Gz * z,
-    )
+    (γ = γ,
+     T1 = 1000.0,
+     T2 = 1000.0,
+     M0 = 1.0,
+     Bz = Gz * z)
 end
 
 m0s = fill(SA[0.0, 0.0, 1.0], num_points)
@@ -46,7 +37,7 @@ end
 
 dt = 1e-7
 Nsteps = Int(round(total_time / dt))
-x0 = zeros(2num_time_segments)
+x0 = 1e-6 * rand(2num_time_segments)
 
 # Pre-compute constants
 segment_duration = total_time / num_time_segments
@@ -104,104 +95,72 @@ function objective(x, params)
         final_state = solve(m0s_static[i], Bx_nodes, By_nodes, params[i])
         total_loss += sum(abs2, final_state[1:2] .- targets_static[i]) / num_points
     end
+    # total_loss += 1e12 * (Bx_nodes' * Bx_nodes + By_nodes' * By_nodes)
     return total_loss
 end
 
 backend = AutoForwardDiff() # AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
 ∇f_prep = prepare_gradient(objective, backend, zero(x0), Constant(params))
 
-function optimize(x, step_size, Niters, f, ∇f_prep)
-    println("Starting optimization...")
+function optimize(x, step_size, Niters, f, ∇f_prep;
+                  β1=0.9, β2=0.999, ε=1e-8)
+    println("Starting Adam optimization...")
 
     ∇f = similar(x)
-    ∇f_prev = similar(x)
-    x_prev = copy(x)
+    m = zeros(length(x))       # 1st moment vector
+    v = zeros(length(x))       # 2nd moment vector
 
-    loss = zeros(Niters)   
-    sol = zeros(length(x), Niters) 
+    loss = zeros(Niters)
+    sol = zeros(length(x), Niters)
 
-    # First iter
-    λ = step_size
-    x_prev .= x
+    # First iteration
     gradient!(f, ∇f, ∇f_prep, backend, x, Constant(params))
-    @. x -= λ * ∇f
+    @. m = (1 - β1) * ∇f
+    @. v = (1 - β2) * ∇f^2
+    m̂ = m ./ (1 - β1)
+    v̂ = v ./ (1 - β2)
+    @. x -= step_size * m̂ / (sqrt(v̂) + ε)
 
     sol[:, 1] = x
     loss[1] = objective(x, params)
-    @printf "Iteration %d: Loss = %.6f | λ = %.2e\n" 1 loss[1] λ
+    @printf "Iteration %d: Loss = %.6f\n" 1 loss[1]
 
-    θ = Inf
-    ∇f_prev .= ∇f
-    λ_prev = λ
-
-    # From Malitsky, Yura, and Konstantin Mishchenko. "Adaptive gradient descent without descent." (2019).
     for i in 2:Niters
-        # Calculate gradient 
         gradient!(f, ∇f, ∇f_prep, backend, x, Constant(params))
-        # Malitsky-Mishchenko step size
-        dx = x .- x_prev
-        dg = ∇f .- ∇f_prev
-        λ = min(√(1 + θ) * λ_prev, norm(dx) / (2 * norm(dg)))
-        # Update
-        x_prev .= x
-        θ = λ / λ_prev
-        λ_prev = λ
-        ∇f_prev .= ∇f
+
+        # Update biased moments
+        @. m = β1 * m + (1 - β1) * ∇f
+        @. v = β2 * v + (1 - β2) * ∇f^2
+
+        # Bias-corrected
+        m̂ = m ./ (1 - β1^i)
+        v̂ = v ./ (1 - β2^i)
+
         # Step
-        @. x -= λ * ∇f
+        @. x -= step_size * m̂ / (sqrt(v̂) + ε)
+
         # Save
         sol[:, i] = x
         loss[i] = objective(x, params)
-        @printf "Iteration %d: Loss = %.6f | λ = %.2e\n" i loss[i] λ
-        # Early stopping condition
-        if abs(loss[i] - loss[i-1]) < 1e-3
+        @printf "Iteration %d: Loss = %.6f\n" i loss[i]
+
+        # Early stopping
+        if abs(loss[i] - loss[i-1]) < 1e-5
             println("Convergence reached at iteration $i")
             loss = loss[1:i]
             sol = sol[:, 1:i]
             break
         end
     end
-    return sol, loss
-end
-
-function optimize_adam(x, step_size, Niters, f, ∇f_prep;
-                       β1=0.9, β2=0.999, ε=1e-8)
-    println("Starting Adam optimization...")
-
-    ∇f = similar(x)
-    m = zeros(length(x))       # 1st moment (mean)
-    v = zeros(length(x))       # 2nd moment (variance)
-    loss = zeros(Niters)
-    sol = zeros(length(x), Niters)
-
-    for k in 1:Niters
-        # Compute loss and gradient
-        loss[k], ∇f = value_and_gradient!(f, ∇f, ∇f_prep, backend, x)
-
-        # Update biased moments
-        @. m = β1 * m + (1 - β1) * ∇f
-        @. v = β2 * v + (1 - β2) * ∇f^2
-
-        # Bias correction
-        m_hat = m ./ (1 - β1^k)
-        v_hat = v ./ (1 - β2^k)
-
-        # Parameter update
-        @. x -= step_size * m_hat / (sqrt(v_hat) + ε)
-
-        # Store results
-        sol[:, k] = x
-        @printf "Iter %d: Loss = %.6f\n" k loss[k]
-    end
 
     return sol, loss
 end
 
 ## Run Optimization
-step_size = 1e-11
-Niters = 30
+step_size = 1e-6
+Niters = 100
 
-sol_history, loss_history = @time optimize_adam(x0, step_size, Niters, objective, ∇f_prep)
+sol_history, loss_history = @time optimize(x0, step_size, Niters, objective, ∇f_prep)
 x_opt = sol_history[:, end]
 
 ## Plotting Results
@@ -227,7 +186,6 @@ p2 = plot(z_positions * 1e3, final_transverse, marker=:circle, markersize=6,
          title="Final vs Target Transverse Magnetization")
 plot!(p2, z_positions * 1e3, target_transverse, marker=:square, markersize=6,
       label="Target |Mxy|", color=:green, lw=2)
-vline!(p2, 1e3 * [- slice_thickness / 2 - δ, - slice_thickness / 2 + δ, slice_thickness / 2 - δ, slice_thickness / 2 + δ], label=nothing, color=:black, linestyle=:dash)
 # Plot 3: Optimized Bx field over time
 time_interval = range(0, total_time, 100)
 Bx_interp = [linear_interp(t, optimized_Bx) for t in time_interval]

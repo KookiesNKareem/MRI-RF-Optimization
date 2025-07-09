@@ -22,7 +22,7 @@ sim_params["Δt_rf"] = 1e-7
 # display(p)
 
 ## Simulate slice profile over the same range as Solve B.jl
-z = target_positions(num_time_segments * 10, dz / 10)  # Match z_positions range from RF optimization.jl
+z = range(-2slice_thickness, 2slice_thickness, 10num_points) # Match z_positions range from RF optimization.jl
 
 # Run simulation
 M = simulate_slice_profile(seq; z, sim_params)
