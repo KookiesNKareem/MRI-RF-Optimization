@@ -16,13 +16,13 @@ total_time = 4.0e-3
 # Slice Parameters
 γ = 2π * 42.58e6
 Gz = 10e-3
-dz = 2π / (γ * Gz * total_time)
 
-function target_positions(N, dz)
-    left = -floor(Int, (N - 1) / 2)
-    right =  ceil(Int, (N - 1) / 2)
-    return dz * collect(left:right)
-end
+# dz = 2π / (γ * Gz * total_time)
+# function target_positions(N, dz)
+#     left = -floor(Int, (N - 1) / 2)
+#     right =  ceil(Int, (N - 1) / 2)
+#     return dz * collect(left:right)
+# end
 
 # This avoids aliasing (Nyquist criterion)
 z_positions = range(-3slice_thickness/2, 3slice_thickness/2, num_points)
@@ -164,11 +164,44 @@ function optimize(x, step_size, Niters, f, ∇f_prep)
     return sol, loss
 end
 
+function optimize_adam(x, step_size, Niters, f, ∇f_prep;
+                       β1=0.9, β2=0.999, ε=1e-8)
+    println("Starting Adam optimization...")
+
+    ∇f = similar(x)
+    m = zeros(length(x))       # 1st moment (mean)
+    v = zeros(length(x))       # 2nd moment (variance)
+    loss = zeros(Niters)
+    sol = zeros(length(x), Niters)
+
+    for k in 1:Niters
+        # Compute loss and gradient
+        loss[k], ∇f = value_and_gradient!(f, ∇f, ∇f_prep, backend, x)
+
+        # Update biased moments
+        @. m = β1 * m + (1 - β1) * ∇f
+        @. v = β2 * v + (1 - β2) * ∇f^2
+
+        # Bias correction
+        m_hat = m ./ (1 - β1^k)
+        v_hat = v ./ (1 - β2^k)
+
+        # Parameter update
+        @. x -= step_size * m_hat / (sqrt(v_hat) + ε)
+
+        # Store results
+        sol[:, k] = x
+        @printf "Iter %d: Loss = %.6f\n" k loss[k]
+    end
+
+    return sol, loss
+end
+
 ## Run Optimization
 step_size = 1e-11
 Niters = 30
 
-sol_history, loss_history = @time optimize(x0, step_size, Niters, objective, ∇f_prep)
+sol_history, loss_history = @time optimize_adam(x0, step_size, Niters, objective, ∇f_prep)
 x_opt = sol_history[:, end]
 
 ## Plotting Results
