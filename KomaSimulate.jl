@@ -2,8 +2,7 @@ using KomaMRICore
 using Plots
 
 ## RF pulse parameters to match Solve B.jl
-N = 4
-rf_amp = optimized_Bx
+rf_amp = optimized_Bx .+ 1im * optimized_By  # Complex RF amplitude
 rf_dur = total_time
 
 # Create RF pulse object
