@@ -1,36 +1,42 @@
-using KomaMRI
+using KomaMRICore
 using Plots
 
-# RF pulse parameters to match Solve B.jl
+## RF pulse parameters to match Solve B.jl
+rf_amp = optimized_Bx .+ 1im * optimized_By  # Complex RF amplitude
 rf_dur = total_time
-rf_amp = optimized_Bx  # Use optimized values directly
 
 # Create RF pulse object
 rf90 = RF(rf_amp, rf_dur)
 
 # Gradient parameters (matching Solve B.jl)
-gz_amp = 10e-3  # 10 mT/m gradient strength
-gz_dur = dur(rf90)
+gz_amp = Gz  # 10 mT/m gradient strength
+gz_dur = total_time
 gz = Grad(gz_amp, gz_dur)
 
 # Create sequence
 seq = Sequence([Grad(0,0); Grad(0,0); gz;;], [rf90;;])
-plot_seq(seq)
-# Simulate slice profile over the same range as Solve B.jl
-z = range(-0.7, 0.7, 300) * 1e-2 |> collect  # Match z_positions range from Solve B.jl
+
+sim_params = KomaMRICore.default_sim_params()
+sim_params["Δt_rf"] = 1e-7
+# p = plot_seqd(seq; sampling_params=sim_params) # You need KomaMRIPlots
+# display(p)
+
+## Simulate slice profile over the same range as Solve B.jl
+z = range(-2slice_thickness, 2slice_thickness, 10num_points) # Match z_positions range from RF optimization.jl
 
 # Run simulation
-M = simulate_slice_profile(seq; z)
+M = simulate_slice_profile(seq; z, sim_params)
 
-# Plot results using Plots.jl
+# ## Plot results using Plots.jl
 plot(z*1e3, abs.(M.xy), 
      xlabel="Position (mm)", 
      ylabel="|Mxy|", 
      title="Optimized RF Slice Profile",
      label="Optimized RF |Mxy|",
-     lw=2, color=:blue)
+     color=:blue)
 
 # Also plot the individual components
-plot!(z*1e3, real.(M.xy), label="Mx", lw=1, color=:red, alpha=0.7)
-plot!(z*1e3, imag.(M.xy), label="My", lw=1, color=:green, alpha=0.7)
-plot!(z*1e3, M.z, label="Mz", lw=1, color=:orange, alpha=0.7)
+plot!(z*1e3, real.(M.xy), label="Mx", lw=1, color=:red)
+plot!(z*1e3, imag.(M.xy), label="My", lw=1, color=:green)
+plot!(z*1e3, M.z, label="Mz", lw=1, color=:orange)
+plot!(z_positions*1e3, zeros(num_points), marker=:circle, label="opt points")
