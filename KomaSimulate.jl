@@ -9,7 +9,7 @@ rf_dur = total_time
 rf90 = RF(rf_amp, rf_dur)
 
 # Gradient parameters (matching Solve B.jl)
-gz_amp = params.Gz  # 10 mT/m gradient strength
+gz_amp = Gz  # 10 mT/m gradient strength
 gz_dur = total_time
 gz = Grad(gz_amp, gz_dur)
 
