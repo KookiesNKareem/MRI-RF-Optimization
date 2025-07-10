@@ -46,6 +46,7 @@ The optimization produces:
 - LinearAlgebra.jl
 - DifferentiationInterface.jl
 - Enzyme.jl
+- Mooncake.jl
 - Plots.jl
 - Random.jl
 
