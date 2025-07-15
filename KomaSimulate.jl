@@ -3,7 +3,7 @@ using Plots
 
 # RF pulse parameters to match Solve B.jl
 rf_dur = total_time
-rf_amp = optimized_Bx
+rf_amp = result.minimizer
 
 # Create RF pulse object
 rf90 = RF(rf_amp, rf_dur)

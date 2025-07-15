@@ -13,9 +13,9 @@ import ForwardDiff
 excited_lower_bound = -0.2e-2
 excited_upper_bound = 0.2e-2
 δ = 0.2e-2  # Slice thickness 
-total_time = 4.0e-3
+total_time = 3.0e-3
 dt = 1e-7
-num_time_segments = 50 
+num_time_segments = 30 
 Nsteps = Int(round(total_time / dt))
 
 # Pre-compute constants
@@ -29,7 +29,7 @@ params = (
     T2 = 1.0, 
     M0 = 1.0, 
     By = 0.0,
-    Gz = 10e-3,
+    Gz = 4e-3,
     max_slope = 70.0
 )
 
@@ -210,88 +210,88 @@ function gradient_descent_step_with_momentum(x, v, step_size, objective, backend
     return x_new, v_new, value
 end
 
-function optimize(x, step_size, iters, objective)
-    println("Starting optimization...")
-    
-    backend = AutoForwardDiff()
+# function optimize(x, step_size, iters, objective)
+#     # Set up forwward differentiation    
+#     backend = AutoForwardDiff()
+#     loss = zeros(iters)
+#     final_iter = iters
 
-    loss = zeros(iters)
-    final_iter = iters
-
-    for i in 1:iters 
-        perturbed_objective = Bx -> objective(Bx; perturb_positions=true)
-        x, loss[i] = gradient_descent_step(x, step_size, perturbed_objective, backend)
-        if i % 5 == 0 
-            println("Iteration $i: Loss = $(loss[i])")
-        end
+#     for i in 1:iters
+#         # Prevent overfitting by perturbing positions
+#         perturbed_objective(Bx) = objective(Bx; perturb_positions=true)
+#         # Perform a gradient descent step
+#         x, loss[i] = gradient_descent_step(x, step_size, perturbed_objective, backend)
+#         if i % 5 == 0 
+#             println("Iteration $i: Loss = $(loss[i])")
+#         end
         
-        final_iter = i
-    end
+#         final_iter = i
+#     end
     
-    return x, loss[1:final_iter]
-end
+#     return x, loss[1:final_iter]
+# end
 
 
-## Run Optimization
-optimized_Bx, loss_history = @time optimize(initial_Bx, 1e-10, 15, objective_vectorized)
+# ## Run Optimization
+# optimized_Bx, loss_history = @time optimize(initial_Bx, 1e-10, 15, objective_vectorized)
 
-println("Final optimized Bx values: ", optimized_Bx)
+# println("Final optimized Bx values: ", optimized_Bx)
 
-## Plotting Results
+# ## Plotting Results
 
-## Plot 1: Loss convergence
-p1 = plot(1:length(loss_history), loss_history, 
-         xlabel="Iteration", ylabel="Loss", 
-         title="Optimization Convergence",
-         lw=2, color=:blue)
+# ## Plot 1: Loss convergence
+# p1 = plot(1:length(loss_history), loss_history, 
+#          xlabel="Iteration", ylabel="Loss", 
+#          title="Optimization Convergence",
+#          lw=2, color=:blue)
 
-# Calculate final magnetization states for all points using optimized functions
-final_states = zeros(3, num_points)
-for idx in 1:num_points
-    # Use unperturbed positions for final evaluation
-    final_state = solve_fast(m0s_static[idx], optimized_Bx, Bz_values[idx], params)
-    final_states[:, idx] = final_state
-end
+# # Calculate final magnetization states for all points using optimized functions
+# final_states = zeros(3, num_points)
+# for idx in 1:num_points
+#     # Use unperturbed positions for final evaluation
+#     final_state = solve_fast(m0s_static[idx], optimized_Bx, z_positions_static[idx], params)
+#     final_states[:, idx] = final_state
+# end
 
-## Plot 2: Final magnetization vs targets
-target_transverse = [sqrt(target[1]^2 + target[2]^2) for target in targets_static]
-final_transverse = sqrt.(final_states[1, :].^2 .+ final_states[2, :].^2)
+# ## Plot 2: Final magnetization vs targets
+# target_transverse = [sqrt(target[1]^2 + target[2]^2) for target in targets_static]
+# final_transverse = sqrt.(final_states[1, :].^2 .+ final_states[2, :].^2)
 
-p2 = plot(z_positions * 1e2, final_transverse, marker=:circle, markersize=6, 
-         label="Final |Mxy|", color=:red, lw=2,
-         xlabel="Z Position (cm)", ylabel="Transverse Magnetization |Mxy|",
-         title="Final vs Target Transverse Magnetization")
-plot!(p2, z_positions * 1e2, target_transverse, marker=:square, markersize=6,
-      label="Target |Mxy|", color=:green, lw=2)
+# p2 = plot(z_positions * 1e2, final_transverse, marker=:circle, markersize=6, 
+#          label="Final |Mxy|", color=:red, lw=2,
+#          xlabel="Z Position (cm)", ylabel="Transverse Magnetization |Mxy|",
+#          title="Final vs Target Transverse Magnetization")
+# plot!(p2, z_positions * 1e2, target_transverse, marker=:square, markersize=6,
+#       label="Target |Mxy|", color=:green, lw=2)
 
-## Plot 3: Optimized Bx field over time
-time_segments = 1:num_time_segments
-t = collect(range(0, total_time, 100))
-Bx_interp = [get_current_Bx_fast(time_val, optimized_Bx) for time_val in t]
+# ## Plot 3: Optimized Bx field over time
+# time_segments = 1:num_time_segments
+# t = collect(range(0, total_time, 100))
+# Bx_interp = [get_current_Bx_fast(time_val, optimized_Bx) for time_val in t]
 
-p3 = plot(t * 1e3, Bx_interp * 1e6, 
-         xlabel="Time (ms)", ylabel="Bx Field (uT)",
-         title="Optimized Bx Field Profile",
-         color=:purple, lw=2)
+# p3 = plot(t * 1e3, Bx_interp * 1e6, 
+#          xlabel="Time (ms)", ylabel="Bx Field (uT)",
+#          title="Optimized Bx Field Profile",
+#          color=:purple, lw=2)
 
-## Plot 4: Magnetization components for all points
-p4 = plot(xlabel="Z Position", ylabel="Magnetization", 
-          title="All Magnetization Components")
-plot!(p4, z_positions, final_states[1, :], marker=:circle, label="Final Mx", color=:red)
-plot!(p4, z_positions, final_states[2, :], marker=:triangle, label="Final My", color=:blue)
-plot!(p4, z_positions, final_states[3, :], marker=:square, label="Final Mz", color=:green, lw=2)
+# ## Plot 4: Magnetization components for all points
+# p4 = plot(xlabel="Z Position", ylabel="Magnetization", 
+#           title="All Magnetization Components")
+# plot!(p4, z_positions, final_states[1, :], marker=:circle, label="Final Mx", color=:red)
+# plot!(p4, z_positions, final_states[2, :], marker=:triangle, label="Final My", color=:blue)
+# plot!(p4, z_positions, final_states[3, :], marker=:square, label="Final Mz", color=:green, lw=2)
 
-## Create combined plot
-combined_plot = plot(p1, p2, p3, p4, layout=(2,2), size=(800, 600))
-display(combined_plot)
+# ## Create combined plot
+# combined_plot = plot(p1, p2, p3, p4, layout=(2,2), size=(800, 600))
+# display(combined_plot)
 
-# Print summary statistics
-println("\n=== Optimization Summary ===")
-println("Converged in $(length(loss_history)) iterations")
-println("Final loss: $(loss_history[end])")
-println("Optimized Bx values: $(optimized_Bx)")
+# # Print summary statistics
+# println("\n=== Optimization Summary ===")
+# println("Converged in $(length(loss_history)) iterations")
+# println("Final loss: $(loss_history[end])")
+# println("Optimized Bx values: $(optimized_Bx)")
 
-# Calculate and print overall accuracy
-# my_error = sqrt(mean((target_my .- final_my).^2))
-# println("\nRMS error in My: $(round(my_error, digits=4))")
-# println("Max error in My: $(round(maximum(abs.(target_my .- final_my)), digits=4))")
+# # Calculate and print overall accuracy
+# # my_error = sqrt(mean((target_my .- final_my).^2))
+# # println("\nRMS error in My: $(round(my_error, digits=4))")
+# # println("Max error in My: $(round(maximum(abs.(target_my .- final_my)), digits=4))")
