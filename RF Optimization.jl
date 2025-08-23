@@ -273,7 +273,7 @@ function init_iq(nseg::Int; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gauss
     return I, Q
 end
 
-function plot_progress(I, Q, iter, loss_val; save_data=false, tag="")
+function plot_progress(I, Q, iter, loss_val; save_data=false)
     Mx, My, Mz = simulate_profile(I, Q)
     mag = hypot.(Mx, My)
 
@@ -292,7 +292,7 @@ function plot_progress(I, Q, iter, loss_val; save_data=false, tag="")
     plot!(p[1], t_rf, Q*1e6, label="By (Q)", lw=2, alpha=0.7)
     hline!(p[1], [rf_bound*1e6, -rf_bound*1e6], ls=:dot, alpha=0.5, label="")
     plot!(p[1], xlabel="Time (ms)", ylabel="RF (μT)",
-          title="$tag iter $iter | loss $(round(loss_val, sigdigits=4))", legend=:topright)
+          title="iter $iter | loss $(round(loss_val, sigdigits=4))", legend=:topright)
 
     plot!(p[2], z*1e3, mag, label="|Mxy|", lw=2)
     plot!(p[2], z*1e3, target_mag, label="Target", lw=2, ls=:dash)
@@ -319,7 +319,6 @@ function optimize_adam(x0::Vector{Float64};
     rel_tol=1e-4,
     plot_every=1,
     save_plots=true,
-    tag="",
     obj = objective()
 )
     gr()
@@ -338,9 +337,9 @@ function optimize_adam(x0::Vector{Float64};
     plots_array = Any[]
     metrics_history = Any[]
 
-    println("Starting $tag optimization")
+    println("Starting optimization")
     for t in 1:max_iters
-        val, g = value_and_gradient(backend, obj, x)
+        val, g = value_and_gradient(obj, backend, x)
         push!(loss_hist, val)
 
         gnorm = norm(g)
@@ -374,10 +373,10 @@ function optimize_adam(x0::Vector{Float64};
             I_curr = x[1:n]; Q_curr = x[n+1:end]
             save_full = (t % 10 == 0) || (t == max_iters)
             if save_full
-                p, metrics = plot_progress(I_curr, Q_curr, t, val; save_data=true, tag=tag)
+                p, metrics = plot_progress(I_curr, Q_curr, t, val; save_data=true)
                 push!(metrics_history, (iter=t, loss=val, metrics=metrics))
             else
-                p = plot_progress(I_curr, Q_curr, t, val; save_data=false, tag=tag)
+                p = plot_progress(I_curr, Q_curr, t, val; save_data=false)
             end
             display(p)
             if save_plots
@@ -386,21 +385,21 @@ function optimize_adam(x0::Vector{Float64};
                     deleteat!(plots_array, 1:200)
                 end
             end
-            println("[$tag] iter $t: loss=$(round(val,sigdigits=5)) |g|=$(round(gnorm,sigdigits=3)) lr=$(round(lr_t,sigdigits=3)) best=$(round(best_loss,sigdigits=5))@$best_iter patience=$patience_counter/$patience")
+            println("iter $t: loss=$(round(val,sigdigits=5)) |g|=$(round(gnorm,sigdigits=3)) lr=$(round(lr_t,sigdigits=3)) best=$(round(best_loss,sigdigits=5))@$best_iter patience=$patience_counter/$patience")
         end
 
         if patience_counter >= patience
-            println("[$tag] Early stopping at iter $t (best @$best_iter, loss=$(round(best_loss,sigdigits=6)))")
+            println("Early stopping at iter $t (best @$best_iter, loss=$(round(best_loss,sigdigits=6)))")
             break
         end
         if t > 50 && gnorm < 1e-7
-            println("[$tag] Converged at iter $t (loss=$(round(val,sigdigits=6)), |g|=$(round(gnorm,sigdigits=6)))")
+            println("Converged at iter $t (loss=$(round(val,sigdigits=6)), |g|=$(round(gnorm,sigdigits=6)))")
             break
         end
     end
 
     if best_loss < loss_hist[end]
-        println("[$tag] Returning best weights from iter $best_iter")
+        println("Returning best weights from iter $best_iter")
         return best_x, loss_hist, plots_array, metrics_history
     else
         return x, loss_hist, plots_array, metrics_history
@@ -413,7 +412,7 @@ function run_optim(; max_iters=150, lr=1e-6, patience=40, plot_every=1)
 
     obj = objective(
         λ_passband = 15.0, λ_stopband = 8.0, λ_transition = 0.2, λ_ripple = 20.0,
-        λ_ctrl = 500.0, λ_tail = 10000.0, λ_tv = 5000.0, λ_tv_iso = 3000.0,
+        λ_ctrl = 500.0, λ_tail = 10000.0, λ_tv = 10000.0, λ_tv_iso = 5000.0,
         λ_accel = 5000.0, λ_jerk = 2000.0, λ_q = 1000.0,
         target_magnitude = 1.0
     )
@@ -421,30 +420,31 @@ function run_optim(; max_iters=150, lr=1e-6, patience=40, plot_every=1)
     @time x_opt, L_hist, P_list, M_hist = optimize_adam(
         x0; max_iters=max_iters, lr=lr, lr_decay=0.998, patience=patience,
         min_delta=1e-6, rel_tol=1e-4, grad_clip=1e2, plot_every=plot_every,
-        save_plots=true, tag="REAL", obj=obj
+        save_plots=true, obj=obj
     )
 
     return (xopt=x_opt, loss_hist=L_hist, plots=P_list, metrics=M_hist)
 end
 
-best = run_optim(max_iters = 150, lr = 1e-6, patience = 40, plot_every = 1)
+best = run_optim(max_iters = 20, lr = 2e-6, patience = 40, plot_every = 1)
 
 xopt = best.xopt
 loss_hist = best.loss_hist
 plots_array = best.plots
 metrics_history = best.metrics
 
+##
 if !isempty(plots_array)
     println("\nCreating animation from $(length(plots_array)) frames...")
     anim = Animation()
     for p in plots_array
-        display(p)
-        frame(anim)
+        frame(anim, p)             
     end
-    gif(anim, "rf_optimization_realistic.gif", fps=5)
-    println("Animation saved as 'rf_optimization_realistic.gif'")
+    gif(anim, "rf_optimization.gif", fps=5)
+    println("Animation saved as 'rf_optimization.gif'")
 end
 
+##
 # Final analysis / plot
 n   = length(xopt) ÷ 2
 Iopt = xopt[1:n]
@@ -466,6 +466,6 @@ println("Mean stopband: $(round(mean(mag_stop), digits=4))")
 println("Phase RMS (core): $(round(sqrt(mean((phase[in_core]).^2)), digits=3)) rad")
 println("Max RF amplitude: $(round(maximum(hypot.(Iopt, Qopt))*1e6, digits=2)) μT")
 
-p_final = plot_progress(Iopt, Qopt, length(loss_hist), loss_hist[end]; tag="FINAL REAL")
+p_final = plot_progress(Iopt, Qopt, length(loss_hist), loss_hist[end];)
 display(p_final)
-savefig(p_final, "final_optimized_profile_realistic.png")
+savefig(p_final, "final_optimized_profile.png")
