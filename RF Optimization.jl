@@ -3,22 +3,21 @@ using DifferentiationInterface
 using Plots
 import ForwardDiff
 
-##
-const total_time        = 4.0e-3    
-const dt                = 2.0e-7   
+const total_time        = 4.0e-3
+const dt                = 2.0e-7
 const Nsteps            = Int(cld(total_time, dt))
 const num_time_segments = 100
 const inv_seg_dur       = num_time_segments / total_time
 
-const max_Gz   = 10e-3 
-const max_slew = 70.0   
-const rf_bound = 12e-6   
+const max_Gz   = 10e-3
+const max_slew = 70.0
+const rf_bound = 12e-6
 
 const params = (γ = 2π*42.58e6, T1 = 1.0, T2 = 1.0, M0 = 1.0)
 
 Random.seed!(1234)
 
-const δ       = 4.0e-3   
+const δ       = 4.0e-3
 const zFOV    = 14.0e-3
 const Nz      = 121
 const z       = collect(range(-zFOV/2, zFOV/2; length=Nz))
@@ -35,7 +34,6 @@ target_mag = fill(0.0, Nz)
 target_mag[in_core] .= 1.0
 target_mag[in_trans] .= NaN
 
-##
 @inline function rf_at(t::Real, I::AbstractVector, Q::AbstractVector)
     s  = clamp(t * inv_seg_dur, 0, num_time_segments - 1e-10)
     i1 = clamp(Int(floor(s)) + 1, 1, num_time_segments - 1)
@@ -119,8 +117,7 @@ end
     return s
 end
 
-##
-function objective_realistic(;
+function objective(;
     λ_passband=15.0, λ_stopband=8.0, λ_transition=0.2,
     λ_ripple=20.0,
     λ_ctrl=500.0, λ_tail=10000.0, λ_tv=5000.0, λ_tv_iso=3000.0,
@@ -132,14 +129,15 @@ function objective_realistic(;
         I = @view x[1:n]; Q = @view x[n+1:end]
         Mx, My, _ = simulate_profile(I, Q)
         loss = zero(T)
-        mag = sqrt.(Mx.^2 .+ My.^2)
 
         if λ_passband != 0
             num = zero(T); cnt = 0
+            b = complex(T(target_magnitude), T(0))
             @inbounds for i in 1:Nz
                 if in_core[i]
-                    e = mag[i] - T(target_magnitude)
-                    num += e^2; cnt += 1
+                    a = complex(Mx[i], My[i])
+                    num += abs2(a - b)
+                    cnt += 1
                 end
             end
             if cnt > 0; loss += T(λ_passband) * num / T(cnt); end
@@ -149,7 +147,9 @@ function objective_realistic(;
             num = zero(T); cnt = 0
             @inbounds for i in 1:Nz
                 if in_stop[i]
-                    num += mag[i]^2; cnt += 1
+                    a = complex(Mx[i], My[i])
+                    num += abs2(a)
+                    cnt += 1
                 end
             end
             if cnt > 0; loss += T(λ_stopband) * num / T(cnt); end
@@ -157,10 +157,12 @@ function objective_realistic(;
 
         if λ_transition != 0
             num = zero(T); cnt = 0
+            b = complex(T(0.5), T(0))
             @inbounds for i in 1:Nz
                 if in_trans[i]
-                    e = mag[i] - T(0.5)
-                    num += e^2; cnt += 1
+                    a = complex(Mx[i], My[i])
+                    num += abs2(a - b)
+                    cnt += 1
                 end
             end
             if cnt > 0; loss += T(λ_transition) * num / T(cnt); end
@@ -170,7 +172,8 @@ function objective_realistic(;
             s1 = zero(T); s2 = zero(T); cnt = 0
             @inbounds for i in 1:Nz
                 if in_core[i]
-                    m = mag[i]; s1 += m; s2 += m^2; cnt += 1
+                    m = hypot(Mx[i], My[i])
+                    s1 += m; s2 += m^2; cnt += 1
                 end
             end
             if cnt > 0
@@ -180,21 +183,10 @@ function objective_realistic(;
             end
         end
 
-        if λ_ctrl != 0
-            loss += T(λ_ctrl) * (sum(abs2, I) + sum(abs2, Q)) / T(length(I))
-        end
-
-        if λ_q != 0 
-            loss += T(λ_q)    * sum(abs2, Q) / T(length(Q))
-        end
-
-        if λ_tv != 0
-            loss += T(λ_tv)     * (tv_smooth(I; ε=1e-10) + tv_smooth(Q; ε=1e-10)) / T(length(I))
-        end
-
-        if λ_tv_iso != 0
-            loss += T(λ_tv_iso) *  tv_iso(I, Q; ε=1e-10) / T(length(I))
-        end
+        if λ_ctrl   != 0; loss += T(λ_ctrl)   * (sum(abs2, I) + sum(abs2, Q)) / T(length(I)); end
+        if λ_q      != 0; loss += T(λ_q)      * sum(abs2, Q) / T(length(Q)); end
+        if λ_tv     != 0; loss += T(λ_tv)     * (tv_smooth(I; ε=1e-10) + tv_smooth(Q; ε=1e-10)) / T(length(I)); end
+        if λ_tv_iso != 0; loss += T(λ_tv_iso) *  tv_iso(I, Q; ε=1e-10) / T(length(I)); end
 
         if λ_accel != 0 && length(I) >= 3
             num = zero(T)
@@ -205,7 +197,6 @@ function objective_realistic(;
             end
             loss += T(λ_accel) * num / T(length(I))
         end
-
         if λ_jerk != 0 && length(I) >= 5
             num = zero(T)
             @inbounds for i in 3:length(I)-2
@@ -232,88 +223,6 @@ function objective_realistic(;
     return obj
 end
 
-function objective_magnitude(;
-    λ_passband=15.0, λ_stopband=8.0, λ_ripple=20.0,
-    λ_ctrl=500.0, λ_tail=10000.0, λ_tv=5000.0, λ_accel=5000.0,
-    target_magnitude=1.0
-)
-    function obj(x::AbstractVector)
-        T = eltype(x); n = length(x) ÷ 2
-        I = @view x[1:n]; Q = @view x[n+1:end]
-        Mx, My, _ = simulate_profile(I, Q)
-        loss = zero(T)
-        mag = sqrt.(Mx.^2 .+ My.^2)
-
-        if λ_passband != 0
-            num = zero(T); cnt = 0
-            @inbounds for i in 1:Nz
-                if in_core[i]
-                    e = mag[i] - T(target_magnitude)
-                    num += e^2; cnt += 1
-                end
-            end
-            if cnt > 0; loss += T(λ_passband) * num / T(cnt); end
-        end
-
-        if λ_stopband != 0
-            num = zero(T); cnt = 0
-            @inbounds for i in 1:Nz
-                if in_stop[i]
-                    num += mag[i]^2; cnt += 1
-                end
-            end
-            if cnt > 0; loss += T(λ_stopband) * num / T(cnt); end
-        end
-
-        if λ_ripple != 0
-            s1 = zero(T); s2 = zero(T); cnt = 0
-            @inbounds for i in 1:Nz
-                if in_core[i]
-                    m = mag[i]; s1 += m; s2 += m^2; cnt += 1
-                end
-            end
-            if cnt > 0
-                μ = s1 / T(cnt)
-                var = s2 / T(cnt) - μ^2
-                loss += T(λ_ripple) * var
-            end
-        end
-
-        if λ_ctrl != 0
-            loss += T(λ_ctrl)  * (sum(abs2, I) + sum(abs2, Q)) / T(length(I))
-        end
-
-        if λ_tv != 0
-            loss += T(λ_tv)    * (tv_smooth(I; ε=1e-10) + tv_smooth(Q; ε=1e-10)) / T(length(I))
-        end
-
-        if λ_accel != 0 && length(I) >= 3
-            num = zero(T)
-            @inbounds for i in 2:length(I)-1
-                d2I = I[i+1] - 2*I[i] + I[i-1]
-                d2Q = Q[i+1] - 2*Q[i] + Q[i-1]
-                num += d2I^2 + d2Q^2
-            end
-            loss += T(λ_accel) * num / T(length(I))
-        end
-
-        if λ_tail != 0
-            n_tail = max(1, Int(ceil(n * 0.15)))
-            num = zero(T)
-            for i in 1:n_tail
-                w = T((n_tail - i + 1) / n_tail)^2
-                num += w * (I[i]^2 + Q[i]^2)
-                num += w * (I[n-i+1]^2 + Q[n-i+1]^2)
-            end
-            loss += T(λ_tail) * num / T(2*n_tail)
-        end
-
-        return loss
-    end
-    return obj
-end
-
-##
 function init_iq(nseg::Int; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gaussian")
     tgrid = collect(range(0, Ttot; length=nseg))
     tmid = Ttot/2
@@ -364,10 +273,9 @@ function init_iq(nseg::Int; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gauss
     return I, Q
 end
 
-##
 function plot_progress(I, Q, iter, loss_val; save_data=false, tag="")
     Mx, My, Mz = simulate_profile(I, Q)
-    mag = sqrt.(Mx.^2 .+ My.^2)
+    mag = hypot.(Mx, My)
 
     if save_data
         phase = atan.(My, Mx)
@@ -388,7 +296,6 @@ function plot_progress(I, Q, iter, loss_val; save_data=false, tag="")
 
     plot!(p[2], z*1e3, mag, label="|Mxy|", lw=2)
     plot!(p[2], z*1e3, target_mag, label="Target", lw=2, ls=:dash)
-
     vspan!(p[2], [-δ*1e3/2, -δ_core*1e3/2], alpha=0.12, color=:yellow, label="")
     vspan!(p[2], [ δ_core*1e3/2,  δ*1e3/2], alpha=0.12, color=:yellow, label="")
     plot!(p[2], xlabel="z (mm)", ylabel="|Mxy|", title="Slice Profile", ylims=(-0.1, 1.2), legend=:topright)
@@ -404,7 +311,7 @@ end
 function optimize_adam(x0::Vector{Float64};
     max_iters=200,
     lr=5e-6,
-    lr_decay=0.995,            
+    lr_decay=0.995,
     β1=0.9, β2=0.999, ϵ=1e-8,
     grad_clip=5e2,
     patience=50,
@@ -413,7 +320,7 @@ function optimize_adam(x0::Vector{Float64};
     plot_every=1,
     save_plots=true,
     tag="",
-    obj = objective_realistic()
+    obj = objective()
 )
     gr()
 
@@ -433,7 +340,7 @@ function optimize_adam(x0::Vector{Float64};
 
     println("Starting $tag optimization")
     for t in 1:max_iters
-        val, g = value_and_gradient(obj, backend, x)
+        val, g = value_and_gradient(backend, obj, x)
         push!(loss_hist, val)
 
         gnorm = norm(g)
@@ -500,112 +407,56 @@ function optimize_adam(x0::Vector{Float64};
     end
 end
 
-function run_optim(; mode="realistic", max_iters=150, lr=1e-6, patience=40, plot_every=1)
-    println("==============================================")
-    println("RF Optimization mode: $mode")
-    println("==============================================")
-
-    println("Initializing with Gaussian pulse...")
+function run_optim(; max_iters=150, lr=1e-6, patience=40, plot_every=1)
     I0, Q0 = init_iq(num_time_segments; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gaussian")
     x0 = vcat(I0, Q0)
 
-    results = Dict{String, Any}()
+    obj = objective(
+        λ_passband = 15.0, λ_stopband = 8.0, λ_transition = 0.2, λ_ripple = 20.0,
+        λ_ctrl = 500.0, λ_tail = 10000.0, λ_tv = 5000.0, λ_tv_iso = 3000.0,
+        λ_accel = 5000.0, λ_jerk = 2000.0, λ_q = 1000.0,
+        target_magnitude = 1.0
+    )
 
-    if mode in ["magnitude", "both"]
-        obj_mag = objective_magnitude(
-            λ_passband = 15.0, λ_stopband = 8.0, λ_ripple = 20.0,
-            λ_ctrl = 500.0, λ_tail = 10000.0, λ_tv = 5000.0, λ_accel = 5000.0,
-            target_magnitude = 1.0
-        )
-        @time x_mag, L_mag, P_mag, M_mag = optimize_adam(
-            x0; max_iters=max_iters, lr=lr, lr_decay=0.998, patience=patience,
-            min_delta=1e-6, rel_tol=1e-4, grad_clip=1e2, plot_every=plot_every,
-            save_plots=true, tag="MAG", obj=obj_mag
-        )
-        results["magnitude"] = (xopt=x_mag, loss_hist=L_mag, plots=P_mag, metrics=M_mag)
-    end
+    @time x_opt, L_hist, P_list, M_hist = optimize_adam(
+        x0; max_iters=max_iters, lr=lr, lr_decay=0.998, patience=patience,
+        min_delta=1e-6, rel_tol=1e-4, grad_clip=1e2, plot_every=plot_every,
+        save_plots=true, tag="REAL", obj=obj
+    )
 
-    if mode in ["realistic", "both"]
-        obj_real = objective_realistic(
-            λ_passband = 15.0, λ_stopband = 8.0, λ_transition = 0.2, λ_ripple = 20.0,
-            λ_ctrl = 500.0, λ_tail = 10000.0, λ_tv = 5000.0, λ_tv_iso = 3000.0,
-            λ_accel = 5000.0, λ_jerk = 2000.0, λ_q = 1000.0,
-            target_magnitude = 1.0
-        )
-        @time x_real, L_real, P_real, M_real = optimize_adam(
-            x0; max_iters=max_iters, lr=lr, lr_decay=0.998, patience=patience,
-            min_delta=1e-6, rel_tol=1e-4, grad_clip=1e2, plot_every=plot_every,
-            save_plots=true, tag="REAL", obj=obj_real
-        )
-        results["realistic"] = (xopt=x_real, loss_hist=L_real, plots=P_real, metrics=M_real)
-    end
-
-
-    if mode == "both"
-        if isempty(results["magnitude"].metrics) || isempty(results["realistic"].metrics)
-            @warn "No per-iteration metrics saved; skipping comparison summary."
-
-            lm = results["magnitude"].loss_hist
-            lr = results["realistic"].loss_hist
-            if last(lm) <= last(lr)
-                return results["magnitude"], "magnitude", results
-            else
-                return results["realistic"], "realistic", results
-            end
-        else
-            mag_final       = results["magnitude"].metrics[end]
-            realistic_final = results["realistic"].metrics[end]
-            if mag_final.metrics.ripple < realistic_final.metrics.ripple
-                return results["magnitude"], "magnitude", results
-            else
-                return results["realistic"], "realistic", results
-            end
-        end
-    else
-        return results[mode], mode, results
-    end
+    return (xopt=x_opt, loss_hist=L_hist, plots=P_list, metrics=M_hist)
 end
 
-##
-best_result, best_type, all_results = run_optim(
-    mode = "realistic",
-    max_iters = 150,
-    lr = 1e-6,
-    patience = 40,
-    plot_every = 1
-)
+best = run_optim(max_iters = 150, lr = 1e-6, patience = 40, plot_every = 1)
 
-xopt = best_result.xopt
-loss_hist = best_result.loss_hist
-plots_array = best_result.plots
-metrics_history = best_result.metrics
-
+xopt = best.xopt
+loss_hist = best.loss_hist
+plots_array = best.plots
+metrics_history = best.metrics
 
 if !isempty(plots_array)
     println("\nCreating animation from $(length(plots_array)) frames...")
     anim = Animation()
     for p in plots_array
-        display(p)  
-        frame(anim)  
+        display(p)
+        frame(anim)
     end
-    gif(anim, "rf_optimization_$(best_type).gif", fps=5)
-    println("Animation saved as 'rf_optimization_$(best_type).gif'")
+    gif(anim, "rf_optimization_realistic.gif", fps=5)
+    println("Animation saved as 'rf_optimization_realistic.gif'")
 end
 
-##
-n = length(xopt) ÷ 2
+# Final analysis / plot
+n   = length(xopt) ÷ 2
 Iopt = xopt[1:n]
 Qopt = xopt[n+1:end]
 
 Mx, My, Mz = simulate_profile(Iopt, Qopt)
-mag = sqrt.(Mx.^2 .+ My.^2)
+mag = hypot.(Mx, My)
 phase = atan.(My, Mx)
 mag_core = mag[in_core]
 mag_stop = mag[in_stop]
 
-println("\n==============================================")
-println("FINAL PERFORMANCE METRICS ($(uppercase(best_type)))")
-println("==============================================")
+println("FINAL PERFORMANCE METRICS")
 println("Optimization iters: $(length(loss_hist))")
 println("Final loss: $(round(loss_hist[end], sigdigits=5))")
 println("Passband mean: $(round(mean(mag_core), digits=3))")
@@ -613,9 +464,8 @@ println("Passband ripple: $(round(maximum(mag_core) - minimum(mag_core), digits=
 println("Max stopband: $(round(maximum(mag_stop), digits=4))")
 println("Mean stopband: $(round(mean(mag_stop), digits=4))")
 println("Phase RMS (core): $(round(sqrt(mean((phase[in_core]).^2)), digits=3)) rad")
-println("Max RF amplitude: $(round(maximum(sqrt.(Iopt.^2 .+ Qopt.^2))*1e6, digits=2)) μT")
+println("Max RF amplitude: $(round(maximum(hypot.(Iopt, Qopt))*1e6, digits=2)) μT")
 
-p_final = plot_progress(Iopt, Qopt, length(loss_hist), loss_hist[end]; tag="FINAL $(uppercase(best_type))")
+p_final = plot_progress(Iopt, Qopt, length(loss_hist), loss_hist[end]; tag="FINAL REAL")
 display(p_final)
-savefig(p_final, "final_optimized_profile_$(best_type).png")
-println("Done.")
+savefig(p_final, "final_optimized_profile_realistic.png")

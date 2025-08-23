@@ -99,13 +99,9 @@ println("Final error: ", norm(final_state - target))
 #           label="Loss", legend=:topright, lw=2)
 
 time_steps = 0:dt:1.0
-p2 = plot(time_steps, mt_optimal[1, :], label="Mx", lw=2, xlabel="Time (s)", ylabel="Magnetization", legend=:topright)
+p2 = plot(time_steps, mt_optimal[1, :], label="Mx", lw=2, xlabel="Time (s)", ylabel="Magnetization", legend=:topright, grid=false)
 plot!(time_steps, mt_optimal[2, :], label="My", lw=2)
 plot!(time_steps, mt_optimal[3, :], label="Mz", lw=2)
-hline!([target[1]], ls=:dash, color=1, alpha=0.7, label=nothing)
-hline!([target[2]], ls=:dash, color=2, alpha=0.7, label=nothing)
-hline!([target[3]], ls=:dash, color=3, alpha=0.7, label=nothing)
-title!("Optimal Magnetization Trajectory")
 
 final_plot = plot(p2, layout=(1,1), size=(800, 600))
 display(final_plot)
