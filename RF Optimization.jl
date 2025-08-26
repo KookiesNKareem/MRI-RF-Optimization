@@ -4,9 +4,9 @@ using Plots
 import ForwardDiff
 
 const total_time        = 4.0e-3
-const dt                = 2.0e-7
+const dt                = 8.0e-5
 const Nsteps            = Int(cld(total_time, dt))
-const num_time_segments = 100
+const num_time_segments = 50
 const inv_seg_dur       = num_time_segments / total_time
 
 const max_Gz   = 10e-3
@@ -20,19 +20,29 @@ Random.seed!(1234)
 const δ       = 4.0e-3
 const zFOV    = 14.0e-3
 const Nz      = 121
-const z       = collect(range(-zFOV/2, zFOV/2; length=Nz))
+const z_base  = collect(range(-zFOV/2, zFOV/2; length=Nz))  # Base positions
 
-const transition_frac = 0.20
+const transition_frac = 0.00
 const δ_core = δ*(1 - transition_frac)
 
-in_roi   = (.-δ/2 .<= z) .& (z .<= δ/2)
-in_core  = (.-δ_core/2 .<= z) .& (z .<= δ_core/2)
-in_trans = in_roi .& .!in_core
-in_stop  = .!in_roi
+const voxel_resolution = zFOV / (Nz - 1)  # Calculate voxel spacing
+const position_offset_range = voxel_resolution / 2 
 
-target_mag = fill(0.0, Nz)
-target_mag[in_core] .= 1.0
-target_mag[in_trans] .= NaN
+function generate_roi_masks(z_positions)
+    in_roi   = (.-δ/2 .<= z_positions) .& (z_positions .<= δ/2)
+    in_core  = (.-δ_core/2 .<= z_positions) .& (z_positions .<= δ_core/2)
+    in_trans = in_roi .& .!in_core
+    in_stop  = .!in_roi
+    
+    target_mag = fill(0.0, Nz)
+    target_mag[in_core] .= 1.0
+    target_mag[in_trans] .= NaN
+    
+    return in_roi, in_core, in_trans, in_stop, target_mag
+end
+
+# Generate base masks (unperturbed)
+const in_roi_base, in_core_base, in_trans_base, in_stop_base, target_mag_base = generate_roi_masks(z_base)
 
 @inline function rf_at(t::Real, I::AbstractVector, Q::AbstractVector)
     s  = clamp(t * inv_seg_dur, 0, num_time_segments - 1e-10)
@@ -72,23 +82,82 @@ end
     return γT*cross(mT, B) + SVector{3}(-mT[1]/T2T, -mT[2]/T2T, -(mT[3]-M0T)/T1T)
 end
 
-@inline function bloch_step(dt, m::SVector{3,Ta}, Bx, By, Bz, p) where {Ta<:Real}
-    T  = promote_type(Ta, typeof(dt), typeof(Bx), typeof(By), typeof(Bz))
-    mT = SVector{3}(T(m[1]), T(m[2]), T(m[3]))
-    return mT + T(dt)*bloch_rhs(mT, T(Bx), T(By), T(Bz), p)
+function Rot(B)
+    # Vector in R³
+    θ = norm(B)
+    nx, ny, nz = B ./ norm(B)
+    # Skew-symmetric matrix in so(3)
+    K = [  0 -nz ny;
+          nz  0 -nx;
+         -ny nx 0   ]
+    # Rotation matrix in SO(3)
+    expK = I + sin(θ) .* K + (1 .- cos(θ)) .* K^2
+    return expK
 end
 
-function simulate_profile(I::AbstractVector, Q::AbstractVector)
+@inline function bloch_step(dt, t, m::SVector{3,Ta}, I, Q, z, p) where {Ta<:Real}
+    T  = promote_type(Ta, typeof(dt), typeof(z))
+    mT = SVector{3}(T(m[1]), T(m[2]), T(m[3]))
+    
+    # Magnus(4) method
+    # Evaluate B field at current time t
+    bx_n, by_n = rf_at(t, I, Q)
+    gz_n = gz_at(t)
+    B_n = SVector{3}(T(bx_n), T(by_n), T(gz_n * z))
+    
+    # Evaluate B field at next time t+dt
+    bx_n1, by_n1 = rf_at(t + dt, I, Q)
+    gz_n1 = gz_at(t + dt)
+    B_n1 = SVector{3}(T(bx_n1), T(by_n1), T(gz_n1 * z))
+    
+    # Magnus expansion terms
+    A_n = -T(p.γ) * B_n
+    A_n1 = -T(p.γ) * B_n1
+    
+    # Ω₁ = dt/2 * (A_n + A_{n+1})
+    Ω1 = T(dt/2) * (A_n + A_n1)
+    
+    # Ω₂ = dt²/12 * (A_{n+1} × A_n)
+    Ω2 = T(dt^2/12) * cross(A_n1, A_n)
+    
+    # Total rotation vector
+    Ω = Ω1 + Ω2
+    
+    m_rot = Rot(Ω) * mT 
+    
+    # Apply relaxation terms (T1 and T2)
+    relax = SVector{3}(-mT[1]/T(p.T2)*T(dt), -mT[2]/T(p.T2)*T(dt), -(mT[3]-T(p.M0))/T(p.T1)*T(dt))
+    
+    return m_rot + relax
+end
+
+# Pre-allocated cache for simulation
+struct SimulationCache
+    m::Vector{SVector{3,Float64}}
+    Mx::Vector{Float64}
+    My::Vector{Float64}
+    Mz::Vector{Float64}
+end
+
+function SimulationCache(n::Int)
+    SimulationCache(
+        [SVector{3}(0.0, 0.0, params.M0) for _ in 1:n],
+        Vector{Float64}(undef, n),
+        Vector{Float64}(undef, n),
+        Vector{Float64}(undef, n)
+    )
+end
+
+# Original single-threaded version
+function simulate_profile(I::AbstractVector, Q::AbstractVector; z_positions=z_base)
     T = promote_type(eltype(I), eltype(Q))
     Mx = Vector{T}(undef, Nz); My = similar(Mx); Mz = similar(Mx)
     @inbounds for iz in 1:Nz
         mm = SVector{3}(T(0), T(0), T(params.M0))
         t  = 0.0
-        zz = z[iz]
+        zz = z_positions[iz]  # Use provided positions
         for _ in 1:Nsteps
-            bx, by = rf_at(t, I, Q)
-            gz     = gz_at(t)
-            mm     = bloch_step(dt, mm, bx, by, T(gz*zz), params)
+            mm = bloch_step(dt, t, mm, I, Q, T(zz), params)
             t += dt
         end
         Mx[iz] = mm[1]; My[iz] = mm[2]; Mz[iz] = mm[3]
@@ -96,127 +165,110 @@ function simulate_profile(I::AbstractVector, Q::AbstractVector)
     return Mx, My, Mz
 end
 
-@inline function tv_smooth(v::AbstractVector; ε=1e-8)
-    T = eltype(v)
-    s = zero(T)
-    @inbounds for i in 2:length(v)
-        diff = v[i] - v[i-1]
-        s += sqrt(diff^2 + T(ε)^2)
+# Parallel version using Threads
+function simulate_profile_parallel(I::AbstractVector, Q::AbstractVector; z_positions=z_base)
+    T = promote_type(eltype(I), eltype(Q))
+    Mx = Vector{T}(undef, Nz)
+    My = Vector{T}(undef, Nz)
+    Mz = Vector{T}(undef, Nz)
+    
+    Threads.@threads for iz in 1:Nz
+        mm = SVector{3}(T(0), T(0), T(params.M0))
+        t  = 0.0
+        zz = z_positions[iz]
+        for _ in 1:Nsteps
+            mm = bloch_step(dt, t, mm, I, Q, T(zz), params)
+            t += dt
+        end
+        Mx[iz] = mm[1]
+        My[iz] = mm[2]
+        Mz[iz] = mm[3]
+    end
+    return Mx, My, Mz
+end
+
+@inline function TV(I::AbstractVector, Q::AbstractVector)
+    T = promote_type(eltype(I), eltype(Q))
+    s = zero(real(T))  # Always return real value
+    @inbounds for i in 2:length(I)
+        dI = I[i] - I[i-1]
+        dQ = Q[i] - Q[i-1]
+        s += abs2(dI) + abs2(dQ)
     end
     return s
 end
 
-@inline function tv_iso(I::AbstractVector, Q::AbstractVector; ε=1e-8)
-    T = promote_type(eltype(I), eltype(Q))
+@inline function TV_profile(mag::AbstractVector)
+    T = eltype(mag)
     s = zero(T)
-    @inbounds for i in 2:length(I)
-        dI = I[i] - I[i-1]
-        dQ = Q[i] - Q[i-1]
-        s += sqrt(dI^2 + dQ^2 + T(ε)^2)
+    @inbounds for i in 2:length(mag)
+        s += abs(mag[i] - mag[i-1])
     end
     return s
 end
 
 function objective(;
-    λ_passband=15.0, λ_stopband=8.0, λ_transition=0.2,
-    λ_ripple=20.0,
-    λ_ctrl=500.0, λ_tail=10000.0, λ_tv=5000.0, λ_tv_iso=3000.0,
-    λ_accel=5000.0, λ_jerk=2000.0, λ_q=1000.0,
-    target_magnitude=1.0
+    λ_profile=10.0,      # profile fidelity
+    λ_smooth=1e12,     # TV on RF
+    λ_power=100.0,       # power constraint
+    λ_profile_tv=10,    # TV on profile
+    target_magnitude=1.0,
+    use_perturbation=true,
+    perturbation_scale=1.0,
+    use_parallel=true
 )
     function obj(x::AbstractVector)
         T = eltype(x); n = length(x) ÷ 2
         I = @view x[1:n]; Q = @view x[n+1:end]
-        Mx, My, _ = simulate_profile(I, Q)
+        
+        if use_perturbation
+            perturbations = (rand(Nz) .- 0.5) .* (2 * position_offset_range * perturbation_scale)
+            z_perturbed = z_base .+ perturbations
+            in_roi, in_core, in_trans, in_stop, _ = generate_roi_masks(z_perturbed)
+        else
+            z_perturbed = z_base
+            in_roi, in_core, in_trans, in_stop = in_roi_base, in_core_base, in_trans_base, in_stop_base
+        end
+        
+        sim_func = use_parallel && Threads.nthreads() > 1 ? simulate_profile_parallel : simulate_profile
+        Mx, My, _ = sim_func(I, Q; z_positions=z_perturbed)
+        mag = Mx.^2 .+ My.^2
         loss = zero(T)
 
-        if λ_passband != 0
-            num = zero(T); cnt = 0
-            b = complex(T(target_magnitude), T(0))
-            @inbounds for i in 1:Nz
-                if in_core[i]
-                    a = complex(Mx[i], My[i])
-                    num += abs2(a - b)
-                    cnt += 1
-                end
+        # profile
+        num_pass = zero(T); cnt_pass = 0
+        @inbounds for i in 1:Nz
+            if in_core[i]
+                m = (Mx[i] - target_magnitude)^2 +  My[i]^2
+                num_pass += m
+                cnt_pass += 1
             end
-            if cnt > 0; loss += T(λ_passband) * num / T(cnt); end
+        end
+        if cnt_pass > 0
+            loss += T(λ_profile) * num_pass / T(cnt_pass)
+        end
+        # stopband
+        num_stop = zero(T); cnt_stop = 0
+        @inbounds for i in 1:Nz
+            if in_stop[i] 
+                m = Mx[i]^2 +  My[i]^2
+                num_stop += m
+                cnt_stop += 1
+            end
+        end
+        if cnt_stop > 0
+            loss += T(λ_profile) * 2.0 * num_stop / T(cnt_stop)
         end
 
-        if λ_stopband != 0
-            num = zero(T); cnt = 0
-            @inbounds for i in 1:Nz
-                if in_stop[i]
-                    a = complex(Mx[i], My[i])
-                    num += abs2(a)
-                    cnt += 1
-                end
-            end
-            if cnt > 0; loss += T(λ_stopband) * num / T(cnt); end
-        end
+        tv_val = TV(I, Q)
+        tv_contrib = λ_smooth * tv_val
+        loss += tv_contrib
+        
+        profile_tv = TV_profile(mag)
+        loss += T(λ_profile_tv) * profile_tv
 
-        if λ_transition != 0
-            num = zero(T); cnt = 0
-            b = complex(T(0.5), T(0))
-            @inbounds for i in 1:Nz
-                if in_trans[i]
-                    a = complex(Mx[i], My[i])
-                    num += abs2(a - b)
-                    cnt += 1
-                end
-            end
-            if cnt > 0; loss += T(λ_transition) * num / T(cnt); end
-        end
-
-        if λ_ripple != 0
-            s1 = zero(T); s2 = zero(T); cnt = 0
-            @inbounds for i in 1:Nz
-                if in_core[i]
-                    m = hypot(Mx[i], My[i])
-                    s1 += m; s2 += m^2; cnt += 1
-                end
-            end
-            if cnt > 0
-                μ = s1 / T(cnt)
-                var = s2 / T(cnt) - μ^2
-                loss += T(λ_ripple) * var
-            end
-        end
-
-        if λ_ctrl   != 0; loss += T(λ_ctrl)   * (sum(abs2, I) + sum(abs2, Q)) / T(length(I)); end
-        if λ_q      != 0; loss += T(λ_q)      * sum(abs2, Q) / T(length(Q)); end
-        if λ_tv     != 0; loss += T(λ_tv)     * (tv_smooth(I; ε=1e-10) + tv_smooth(Q; ε=1e-10)) / T(length(I)); end
-        if λ_tv_iso != 0; loss += T(λ_tv_iso) *  tv_iso(I, Q; ε=1e-10) / T(length(I)); end
-
-        if λ_accel != 0 && length(I) >= 3
-            num = zero(T)
-            @inbounds for i in 2:length(I)-1
-                d2I = I[i+1] - 2*I[i] + I[i-1]
-                d2Q = Q[i+1] - 2*Q[i] + Q[i-1]
-                num += d2I^2 + d2Q^2
-            end
-            loss += T(λ_accel) * num / T(length(I))
-        end
-        if λ_jerk != 0 && length(I) >= 5
-            num = zero(T)
-            @inbounds for i in 3:length(I)-2
-                d3I = I[i+2] - 3*I[i+1] + 3*I[i] - I[i-1]
-                d3Q = Q[i+2] - 3*Q[i+1] + 3*Q[i] - Q[i-1]
-                num += d3I^2 + d3Q^2
-            end
-            loss += T(λ_jerk) * num / T(length(I))
-        end
-
-        if λ_tail != 0
-            n_tail = max(1, Int(ceil(n * 0.15)))
-            num = zero(T)
-            for i in 1:n_tail
-                w = T((n_tail - i + 1) / n_tail)^2
-                num += w * (I[i]^2 + Q[i]^2)
-                num += w * (I[n-i+1]^2 + Q[n-i+1]^2)
-            end
-            loss += T(λ_tail) * num / T(2*n_tail)
-        end
+        power = (sum(abs2, I) + sum(abs2, Q)) / T(2*length(I))
+        loss += T(λ_power) * power
 
         return loss
     end
@@ -232,11 +284,11 @@ function init_iq(nseg::Int; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gauss
         s = exp.(-0.5 * ((tgrid .- tmid) ./ σ).^2)
         edge_fraction = 0.15
         n_edge = Int(ceil(nseg * edge_fraction))
-        for i in 1:n_edge
-            w = sin(π * i / (2 * n_edge))^2
-            s[i] *= w
-            s[end-i+1] *= w
-        end
+        # for i in 1:n_edge
+        #     w = sin(π * i / (2 * n_edge))^2
+        #     s[i] *= w
+        #     s[end-i+1] *= w
+        # end
     elseif kind == "sech"
         β = 2*tbw / Ttot
         s = sech.(β * (tgrid .- tmid))
@@ -266,7 +318,7 @@ function init_iq(nseg::Int; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gauss
     θ = deg2rad(flip_deg)
     dt_seg = Ttot / (nseg - 1)
     area = sum(abs.(s)) * dt_seg
-    scale = (θ / params.γ) / area * 0.6
+    scale = (θ / params.γ) / area
 
     I = clamp.(s .* scale, -rf_bound*0.8, rf_bound*0.8)
     Q = zeros(length(I))
@@ -274,13 +326,13 @@ function init_iq(nseg::Int; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gauss
 end
 
 function plot_progress(I, Q, iter, loss_val; save_data=false)
-    Mx, My, Mz = simulate_profile(I, Q)
+    Mx, My, Mz = simulate_profile(I, Q; z_positions=z_base)
     mag = hypot.(Mx, My)
 
     if save_data
         phase = atan.(My, Mx)
-        mag_core = mag[in_core]
-        mag_stop = mag[in_stop]
+        mag_core = mag[in_core_base]
+        mag_stop = mag[in_stop_base]
         ripple = maximum(mag_core) - minimum(mag_core)
         stopmax = maximum(mag_stop)
     end
@@ -294,8 +346,8 @@ function plot_progress(I, Q, iter, loss_val; save_data=false)
     plot!(p[1], xlabel="Time (ms)", ylabel="RF (μT)",
           title="iter $iter | loss $(round(loss_val, sigdigits=4))", legend=:topright)
 
-    plot!(p[2], z*1e3, mag, label="|Mxy|", lw=2)
-    plot!(p[2], z*1e3, target_mag, label="Target", lw=2, ls=:dash)
+    plot!(p[2], z_base*1e3, mag, label="|Mxy|", lw=2)
+    plot!(p[2], z_base*1e3, target_mag_base, label="Target", lw=2, ls=:dash)
     vspan!(p[2], [-δ*1e3/2, -δ_core*1e3/2], alpha=0.12, color=:yellow, label="")
     vspan!(p[2], [ δ_core*1e3/2,  δ*1e3/2], alpha=0.12, color=:yellow, label="")
     plot!(p[2], xlabel="z (mm)", ylabel="|Mxy|", title="Slice Profile", ylims=(-0.1, 1.2), legend=:topright)
@@ -319,7 +371,9 @@ function optimize_adam(x0::Vector{Float64};
     rel_tol=1e-4,
     plot_every=1,
     save_plots=true,
-    obj = objective()
+    perturbation_schedule = "constant",  # "constant", "linear_decay", or "cosine_decay"
+    use_parallel = Threads.nthreads() > 1,  # Auto-detect if parallel available
+    obj_params = (λ_profile=200.0, λ_smooth=1e10, λ_power=10000.0, λ_profile_tv=5)  # Configurable params
 )
     gr()
 
@@ -337,9 +391,31 @@ function optimize_adam(x0::Vector{Float64};
     plots_array = Any[]
     metrics_history = Any[]
 
-    println("Starting optimization")
+    println("Voxel resolution: $(round(voxel_resolution*1e3, digits=3)) mm")
+    println("Offset range: ±$(round(position_offset_range*1e3, digits=3)) mm (uniform distribution)")
+    println("Using $(use_parallel ? "parallel" : "serial") simulation with $(Threads.nthreads()) threads")
+    
     for t in 1:max_iters
-        val, g = value_and_gradient(obj, backend, x)
+        if perturbation_schedule == "linear_decay"
+            perturb_scale = 1.0 - (t-1) / max_iters
+        elseif perturbation_schedule == "cosine_decay"
+            perturb_scale = 0.5 * (1 + cos(π * (t-1) / max_iters))
+        else
+            perturb_scale = 1.0
+        end
+        
+        obj_perturbed = objective(
+            λ_profile = obj_params.λ_profile,
+            λ_smooth = obj_params.λ_smooth,
+            λ_power = obj_params.λ_power,
+            λ_profile_tv = obj_params.λ_profile_tv,
+            target_magnitude = 1.0,
+            use_perturbation = true,
+            perturbation_scale = perturb_scale,
+            use_parallel = use_parallel
+        )
+        
+        val, g = value_and_gradient(obj_perturbed, backend, x)
         push!(loss_hist, val)
 
         gnorm = norm(g)
@@ -385,7 +461,7 @@ function optimize_adam(x0::Vector{Float64};
                     deleteat!(plots_array, 1:200)
                 end
             end
-            println("iter $t: loss=$(round(val,sigdigits=5)) |g|=$(round(gnorm,sigdigits=3)) lr=$(round(lr_t,sigdigits=3)) best=$(round(best_loss,sigdigits=5))@$best_iter patience=$patience_counter/$patience")
+            println("iter $t: loss=$(round(val,sigdigits=5)) |g|=$(round(gnorm,sigdigits=3)) lr=$(round(lr_t,sigdigits=3)) perturb_scale=$(round(perturb_scale,digits=3)) best=$(round(best_loss,sigdigits=5))@$best_iter patience=$patience_counter/$patience")
         end
 
         if patience_counter >= patience
@@ -406,27 +482,21 @@ function optimize_adam(x0::Vector{Float64};
     end
 end
 
-function run_optim(; max_iters=150, lr=1e-6, patience=40, plot_every=1)
+function run_optim(; max_iters=150, lr=1e-6, patience=40, plot_every=1, perturbation_schedule="constant")
     I0, Q0 = init_iq(num_time_segments; Ttot=total_time, tbw=3.0, flip_deg=90.0, kind="gaussian")
     x0 = vcat(I0, Q0)
-
-    obj = objective(
-        λ_passband = 15.0, λ_stopband = 8.0, λ_transition = 0.2, λ_ripple = 20.0,
-        λ_ctrl = 500.0, λ_tail = 10000.0, λ_tv = 10000.0, λ_tv_iso = 5000.0,
-        λ_accel = 5000.0, λ_jerk = 2000.0, λ_q = 1000.0,
-        target_magnitude = 1.0
-    )
 
     @time x_opt, L_hist, P_list, M_hist = optimize_adam(
         x0; max_iters=max_iters, lr=lr, lr_decay=0.998, patience=patience,
         min_delta=1e-6, rel_tol=1e-4, grad_clip=1e2, plot_every=plot_every,
-        save_plots=true, obj=obj
+        save_plots=true, perturbation_schedule=perturbation_schedule
     )
 
     return (xopt=x_opt, loss_hist=L_hist, plots=P_list, metrics=M_hist)
 end
 
-best = run_optim(max_iters = 20, lr = 2e-6, patience = 40, plot_every = 1)
+println("Running optimization...")
+best = run_optim(max_iters=300, lr=2e-6, patience=40, plot_every=1, perturbation_schedule="constant")
 
 xopt = best.xopt
 loss_hist = best.loss_hist
@@ -445,27 +515,26 @@ if !isempty(plots_array)
 end
 
 ##
-# Final analysis / plot
 n   = length(xopt) ÷ 2
 Iopt = xopt[1:n]
 Qopt = xopt[n+1:end]
 
-Mx, My, Mz = simulate_profile(Iopt, Qopt)
+Mx, My, Mz = simulate_profile(Iopt, Qopt; z_positions=z_base)
 mag = hypot.(Mx, My)
 phase = atan.(My, Mx)
-mag_core = mag[in_core]
-mag_stop = mag[in_stop]
+mag_core = mag[in_core_base]
+mag_stop = mag[in_stop_base]
 
-println("FINAL PERFORMANCE METRICS")
+println("\nFINAL PERFORMANCE METRICS")
 println("Optimization iters: $(length(loss_hist))")
 println("Final loss: $(round(loss_hist[end], sigdigits=5))")
 println("Passband mean: $(round(mean(mag_core), digits=3))")
 println("Passband ripple: $(round(maximum(mag_core) - minimum(mag_core), digits=3))")
 println("Max stopband: $(round(maximum(mag_stop), digits=4))")
 println("Mean stopband: $(round(mean(mag_stop), digits=4))")
-println("Phase RMS (core): $(round(sqrt(mean((phase[in_core]).^2)), digits=3)) rad")
+println("Phase RMS (core): $(round(sqrt(mean((phase[in_core_base]).^2)), digits=3)) rad")
 println("Max RF amplitude: $(round(maximum(hypot.(Iopt, Qopt))*1e6, digits=2)) μT")
 
-p_final = plot_progress(Iopt, Qopt, length(loss_hist), loss_hist[end];)
+p_final = plot_progress(Iopt, Qopt, length(loss_hist), loss_hist[end])
 display(p_final)
-savefig(p_final, "final_optimized_profile.png")
+savefig(p_final, "final_optimized_profilet.png")
